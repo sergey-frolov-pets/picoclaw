@@ -66,6 +66,9 @@ func getFactory(name string) (ChannelFactory, bool) {
 	return f, ok
 }
 
+// LookupFactoryForTest exposes getFactory for out-of-tree verification only.
+func LookupFactoryForTest(name string) (ChannelFactory, bool) { return getFactory(name) }
+
 // GetRegisteredFactoryNames returns a slice of all registered channel factory names.
 func GetRegisteredFactoryNames() []string {
 	factoriesMu.RLock()

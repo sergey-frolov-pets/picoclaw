@@ -312,6 +312,53 @@ func (m *Manager) RecordPlaceholder(channel, chatID, placeholderID string) {
 	m.placeholders.Store(key, placeholderEntry{id: placeholderID, createdAt: time.Now()})
 }
 
+// splitPlaceholderKey reverses the "channel:chatID" key used by the
+// placeholders map. Channel names never contain ':', so the first colon is the
+// separator; the remainder is the chat ID.
+func splitPlaceholderKey(key string) (channel, chatID string, ok bool) {
+	idx := strings.IndexByte(key, ':')
+	if idx <= 0 || idx == len(key)-1 {
+		return "", "", false
+	}
+	return key[:idx], key[idx+1:], true
+}
+
+// DismissPlaceholder deletes any pending "Thinking…" placeholder registered for
+// the given channel/chat, without editing it to a final response.
+//
+// It is used when a turn ends without producing a visible response (hard abort,
+// tool-only turn, empty LLM output, response already delivered by the message
+// tool). In those cases no final outbound reaches preSend, so the placeholder
+// would otherwise linger in the chat as an empty bubble until the TTL janitor
+// evicts it. Safe to call when no placeholder is registered (no-op).
+func (m *Manager) DismissPlaceholder(ctx context.Context, channel, chatID string) {
+	if m == nil || channel == "" || chatID == "" {
+		return
+	}
+	key := channel + ":" + chatID
+	v, loaded := m.placeholders.LoadAndDelete(key)
+	if !loaded {
+		return
+	}
+	entry, ok := v.(placeholderEntry)
+	if !ok || entry.id == "" {
+		return
+	}
+	ch, ok := m.GetChannel(channel)
+	if !ok {
+		return
+	}
+	if deleter, ok := ch.(MessageDeleter); ok {
+		deleter.DeleteMessage(ctx, chatID, entry.id) // best effort
+		return
+	}
+	if editor, ok := ch.(MessageEditor); ok {
+		// Fallback for channels without delete support: blank the placeholder so
+		// it stops looking like an in-flight "Thinking…" bubble.
+		_ = editor.EditMessage(ctx, chatID, entry.id, "…")
+	}
+}
+
 // SendPlaceholder sends a "Thinking…" placeholder for the given channel/chatID
 // and records it for later editing. Returns true if a placeholder was sent.
 func (m *Manager) SendPlaceholder(ctx context.Context, channel, chatID string) bool {
@@ -1853,7 +1900,26 @@ func (m *Manager) runTTLJanitor(ctx context.Context) {
 			m.placeholders.Range(func(key, value any) bool {
 				if entry, ok := value.(placeholderEntry); ok {
 					if now.Sub(entry.createdAt) > placeholderTTL {
-						m.placeholders.Delete(key)
+						if _, loaded := m.placeholders.LoadAndDelete(key); loaded {
+							// The turn never produced a final outbound (crash,
+							// restart, hard abort, LLM error), so the "Thinking…"
+							// placeholder is still visible to the user. Delete the
+							// actual platform message, not just the bookkeeping
+							// entry, otherwise it lingers forever as an empty
+							// bubble. Best effort: the channel may be gone or the
+							// message already removed.
+							if entry.id != "" {
+								if keyStr, ok := key.(string); ok {
+									if name, chatID, ok := splitPlaceholderKey(keyStr); ok {
+										if ch, ok := m.GetChannel(name); ok {
+											if deleter, ok := ch.(MessageDeleter); ok {
+												deleter.DeleteMessage(ctx, chatID, entry.id) // best effort
+											}
+										}
+									}
+								}
+							}
+						}
 					}
 				}
 				return true
