@@ -160,24 +160,87 @@ func TestShellTool_DangerousCommand(t *testing.T) {
 	}
 }
 
+// TestShellTool_DangerousCommand_KillBlocked verifies the narrowed kill guard:
+// only "kill -1" (all processes) is blocked; targeted PID kills are allowed
+// because our own scripts (restart_gateway.sh, stop_dup_build.sh) need them.
 func TestShellTool_DangerousCommand_KillBlocked(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	if err != nil {
-		t.Errorf("unable to configure exec tool: %s", err)
+		t.Fatalf("unable to configure exec tool: %s", err)
 	}
 
 	ctx := context.Background()
-	args := map[string]any{
-		"action":  "run",
-		"command": "kill 12345",
+
+	for _, cmd := range []string{"kill -1", "kill -9 -1"} {
+		result := tool.Execute(ctx, map[string]any{"action": "run", "command": cmd})
+		if !result.IsError {
+			t.Errorf("expected %q to be blocked", cmd)
+			continue
+		}
+		if !strings.Contains(result.ForLLM, "blocked") && !strings.Contains(result.ForUser, "blocked") {
+			t.Errorf("expected blocked message for %q, got ForLLM: %s, ForUser: %s",
+				cmd, result.ForLLM, result.ForUser)
+		}
 	}
 
-	result := tool.Execute(ctx, args)
-	if !result.IsError {
-		t.Errorf("Expected kill command to be blocked")
+	// Targeted kill must not be rejected by the guard. The process does not
+	// exist, so the command itself fails — but it must not be *blocked*.
+	result := tool.Execute(ctx, map[string]any{"action": "run", "command": "kill 12345"})
+	if strings.Contains(result.ForLLM, "blocked") || strings.Contains(result.ForUser, "blocked") {
+		t.Errorf("targeted kill should not be blocked, got ForLLM: %s", result.ForLLM)
 	}
-	if !strings.Contains(result.ForLLM, "blocked") && !strings.Contains(result.ForUser, "blocked") {
-		t.Errorf("Expected blocked message, got ForLLM: %s, ForUser: %s", result.ForLLM, result.ForUser)
+}
+
+// TestShellTool_GuardAllowsOwnScripts verifies that constructs used by our own
+// scripts are not rejected: ${VAR}, $(...), backticks, heredoc, `source *.sh`,
+// `git push`, `chmod 755`.
+func TestShellTool_GuardAllowsOwnScripts(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	allowed := []string{
+		"echo ${HOME}",
+		"echo $(date)",
+		"echo `date`",
+		"source scripts/backup.sh",
+		"git push origin main",
+		"chmod 755 scripts/restart_gateway.sh",
+	}
+	for _, cmd := range allowed {
+		r := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
+		if strings.Contains(r.ForLLM, "blocked") || strings.Contains(r.ForUser, "blocked") {
+			t.Errorf("guard must allow %q, got: %s", cmd, r.ForLLM)
+		}
+	}
+}
+
+// TestShellTool_GuardStillBlocksDangerous verifies the genuinely dangerous
+// patterns survived the cleanup.
+func TestShellTool_GuardStillBlocksDangerous(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	blocked := []string{
+		"rm -rf /",
+		"dd if=/dev/zero of=/dev/sda",
+		"sudo apt update",
+		"chown root:root /etc/passwd",
+		"pkill -9 foo",
+		"killall foo",
+		"docker run alpine",
+		"eval ls",
+		"mkfs.ext4 /dev/sdb1",
+		"shutdown -h now",
+	}
+	for _, cmd := range blocked {
+		r := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
+		if !strings.Contains(r.ForLLM, "blocked") && !strings.Contains(r.ForUser, "blocked") {
+			t.Errorf("guard must block %q, got: %s", cmd, r.ForLLM)
+		}
 	}
 }
 
@@ -678,12 +741,14 @@ func TestShellTool_CustomAllowPatterns(t *testing.T) {
 		t.Errorf("custom allow pattern should exempt 'git push origin main', got: %s", result.ForLLM)
 	}
 
-	// "git push upstream main" should still be blocked (does not match allow pattern).
+	// "git push upstream main" is no longer denied by default: the repo pushes
+	// to its own remotes with an injected token, so blanket-blocking git push
+	// broke our workflow. Only the custom allow pattern differs here.
 	result = tool.Execute(context.Background(), map[string]any{
 		"command": "git push upstream main",
 	})
-	if !result.IsError {
-		t.Errorf("'git push upstream main' should still be blocked by deny pattern")
+	if result.IsError && strings.Contains(result.ForLLM, "blocked") {
+		t.Errorf("'git push upstream main' should not be blocked, got: %s", result.ForLLM)
 	}
 }
 

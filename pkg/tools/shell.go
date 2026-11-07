@@ -53,9 +53,11 @@ var (
 		regexp.MustCompile(`\brm\s+-[rf]{1,2}\b`),
 		regexp.MustCompile(`\bdel\s+/[fq]\b`),
 		regexp.MustCompile(`\brmdir\s+/s\b`),
-		// Match disk wiping commands (must be followed by space/args)
+		// Match disk wiping commands (must be followed by space/args).
+		// `mkfs\.\w+` covers filesystem-specific variants (mkfs.ext4, mkfs.xfs, …)
+		// which the plain `mkfs` alternative misses because of the dot.
 		regexp.MustCompile(
-			`(^|[^-\w])\b(format|mkfs|diskpart)\b\s`,
+			`(^|[^-\w])\b(format|mkfs|mkfs\.\w+|diskpart)\b\s`,
 		),
 		regexp.MustCompile(`\bdd\s+if=`),
 		// Block writes to block devices (all common naming schemes).
@@ -64,25 +66,22 @@ var (
 		),
 		regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`),
 		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
-		regexp.MustCompile(`\$\([^)]+\)`),
-		regexp.MustCompile(`\$\{[^}]+\}`),
-		regexp.MustCompile("`[^`]+`"),
 		regexp.MustCompile(`\|\s*sh\b`),
 		regexp.MustCompile(`\|\s*bash\b`),
 		regexp.MustCompile(`;\s*rm\s+-[rf]`),
 		regexp.MustCompile(`&&\s*rm\s+-[rf]`),
 		regexp.MustCompile(`\|\|\s*rm\s+-[rf]`),
-		regexp.MustCompile(`<<\s*EOF`),
 		regexp.MustCompile(`\$\(\s*cat\s+`),
 		regexp.MustCompile(`\$\(\s*curl\s+`),
 		regexp.MustCompile(`\$\(\s*wget\s+`),
 		regexp.MustCompile(`\$\(\s*which\s+`),
 		regexp.MustCompile(`\bsudo\b`),
-		regexp.MustCompile(`\bchmod\s+[0-7]{3,4}\b`),
 		regexp.MustCompile(`\bchown\b`),
 		regexp.MustCompile(`\bpkill\b`),
+		// Only "kill -1" / "kill -9 -1" (all processes) is dangerous;
+		// targeted PID kills are legitimate and must stay allowed.
+		regexp.MustCompile(`\bkill\s+(-[0-9]+\s+)?-1\b`),
 		regexp.MustCompile(`\bkillall\b`),
-		regexp.MustCompile(`\bkill\b`),
 		regexp.MustCompile(`\bcurl\b.*\|\s*(sh|bash)`),
 		regexp.MustCompile(`\bwget\b.*\|\s*(sh|bash)`),
 		regexp.MustCompile(`\bnpm\s+install\s+-g\b`),
@@ -92,11 +91,9 @@ var (
 		regexp.MustCompile(`\bdnf\s+(install|remove)\b`),
 		regexp.MustCompile(`\bdocker\s+run\b`),
 		regexp.MustCompile(`\bdocker\s+exec\b`),
-		regexp.MustCompile(`\bgit\s+push\b`),
 		regexp.MustCompile(`\bgit\s+force\b`),
 		regexp.MustCompile(`\bssh\b.*@`),
 		regexp.MustCompile(`\beval\b`),
-		regexp.MustCompile(`\bsource\s+.*\.sh\b`),
 	}
 
 	// windowsDenyPatterns contains PowerShell-specific deny patterns that only
